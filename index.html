@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SFS Mini" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#02040a" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <title>SFS Mini</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; user-select: none; }
+    html, body { height: 100%; background: #02040a; color: #dce8ff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; overflow: hidden; touch-action: none; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; background: #02040a; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      padding: calc(10px + env(safe-area-inset-top)) 14px 8px;
+      font-size: 12px; letter-spacing: 0.04em;
+      pointer-events: none; text-shadow: 0 1px 4px #000;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 3px 16px; z-index: 2;
+    }
+    #hud b { color: #fff; }
+    #fuelwrap { grid-column: 1 / -1; height: 8px; background: #1a2230; border: 1px solid #3a4a66; margin-top: 4px; border-radius: 4px; overflow: hidden; }
+    #fuelbar { height: 100%; width: 100%; background: linear-gradient(90deg, #e05a2b, #f0c040); }
+    #msg { position: fixed; top: calc(78px + env(safe-area-inset-top)); left: 0; right: 0; text-align: center; font-size: 16px; font-weight: 700; pointer-events: none; text-shadow: 0 2px 8px #000; z-index: 2; }
+    #controls {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      display: flex; gap: 12px; padding: 12px 16px calc(18px + env(safe-area-inset-bottom));
+      justify-content: space-between; align-items: flex-end; z-index: 3;
+    }
+    .btn {
+      width: 76px; height: 76px; border-radius: 16px;
+      border: 1px solid #4a6080; background: rgba(20, 30, 48, 0.82);
+      color: #cfe0ff; font-size: 24px; font-weight: 700;
+      backdrop-filter: blur(8px);
+    }
+    .btn:active, .btn.held { background: rgba(70, 110, 180, 0.9); }
+    #throttle { width: 118px; height: 90px; font-size: 14px; letter-spacing: 0.1em; }
+    #overlay {
+      position: fixed; inset: 0; background: rgba(4, 8, 16, 0.92);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      text-align: center; padding: 24px; z-index: 10;
+    }
+    #overlay.hidden { display: none; }
+    #overlay img { width: 84px; height: 84px; border-radius: 20px; margin-bottom: 14px; }
+    #overlay h1 { font-size: 1.7rem; margin-bottom: 8px; }
+    #overlay p { max-width: 340px; line-height: 1.45; opacity: 0.85; margin-bottom: 8px; }
+    #overlay button {
+      margin-top: 14px; background: #3d6ec9; color: #fff; border: none;
+      padding: 14px 32px; border-radius: 12px; font-size: 1.05rem; font-weight: 700;
+    }
+    .hint { font-size: 0.8rem; opacity: 0.6; }
+    #installHint { display: none; margin-top: 16px; font-size: 0.78rem; opacity: 0.7; max-width: 300px; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud">
+    <div>ALT <b id="alt">0</b></div>
+    <div>SPD <b id="spd">0</b> m/s</div>
+    <div>APO <b id="apo">—</b></div>
+    <div>PER <b id="per">—</b></div>
+    <div id="fuelwrap"><div id="fuelbar"></div></div>
+  </div>
+  <div id="msg"></div>
+  <div id="controls">
+    <button class="btn" id="left" type="button">◀</button>
+    <button class="btn" id="throttle" type="button">IGNITE</button>
+    <button class="btn" id="right" type="button">▶</button>
+  </div>
+  <div id="overlay">
+    <img src="apple-touch-icon.png" alt="" />
+    <h1>SFS Mini</h1>
+    <p>Build velocity, pitch over, and circularize. Hold IGNITE to launch. ◀ ▶ to rotate.</p>
+    <p class="hint">Goal: periapsis above 80 km. Crash too fast and you RUD.</p>
+    <p class="hint" id="installHint">On iPhone: Share → Add to Home Screen to install this as an app.</p>
+    <button id="go" type="button">Launch</button>
+  </div>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");
+    const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone;
+    if (!standalone) document.getElementById("installHint").style.display = "block";
+
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+    const overlay = document.getElementById("overlay");
+    const msgEl = document.getElementById("msg");
+    const fuelbar = document.getElementById("fuelbar");
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    const G = 6.67430e-11;
+    const PLANET_R = 6371000;
+    const PLANET_M = 5.972e24;
+    const ATM_H = 80000;
+    const SCALE_DRAW = 1 / 18000;
+
+    let rocket, cam, stars, running, won, last, keys;
+    let holdL = false, holdR = false, holdT = false;
+
+    function reset() {
+      rocket = {
+        x: 0, y: -PLANET_R - 18,
+        vx: 0, vy: 0, ang: -Math.PI / 2, av: 0,
+        fuel: 1, dry: 14000, fuelMass: 42000,
+        thrust: 1400000, isp: 310,
+        w: 14, h: 46, alive: true, fire: 0, grounded: true
+      };
+      cam = { x: rocket.x, y: rocket.y, z: 1 };
+      won = false; running = false; last = 0; keys = {};
+      msgEl.textContent = "";
+      stars = Array.from({ length: 180 }, () => ({
+        a: Math.random() * Math.PI * 2,
+        d: 900 + Math.random() * 4200,
+        s: 0.4 + Math.random() * 1.4
+      }));
+    }
+    reset();
+
+    function rmag() { return Math.hypot(rocket.x, rocket.y); }
+    function alt() { return rmag() - PLANET_R; }
+    function spd() { return Math.hypot(rocket.vx, rocket.vy); }
+
+    function orbitalElements() {
+      const rx = rocket.x, ry = rocket.y;
+      const r = Math.hypot(rx, ry);
+      const vx = rocket.vx, vy = rocket.vy;
+      const mu = G * PLANET_M;
+      const h = rx * vy - ry * vx;
+      const energy = 0.5 * (vx * vx + vy * vy) - mu / r;
+      if (energy >= 0 || Math.abs(h) < 1) return { apo: null, per: null };
+      const a = -mu / (2 * energy);
+      const ecc = Math.sqrt(Math.max(0, 1 - (h * h) / (a * mu)));
+      return { apo: a * (1 + ecc) - PLANET_R, per: a * (1 - ecc) - PLANET_R };
+    }
+
+    function fmt(m) {
+      if (m == null || !isFinite(m)) return "—";
+      if (Math.abs(m) >= 1000) return (m / 1000).toFixed(1) + " km";
+      return Math.round(m) + " m";
+    }
+
+    function thrustingNow() {
+      return (holdT || keys.w || keys.W || keys[" "]) && rocket.fuel > 0 && rocket.alive;
+    }
+
+    function physics(dt) {
+      if (!rocket.alive) return;
+      const rx = rocket.x, ry = rocket.y;
+      const r = Math.hypot(rx, ry);
+      const mu = G * PLANET_M;
+      const g = mu / (r * r);
+      const gx = -rx / r * g;
+      const gy = -ry / r * g;
+
+      if (holdL || keys.a || keys.ArrowLeft) rocket.av -= 3.6 * dt;
+      if (holdR || keys.d || keys.ArrowRight) rocket.av += 3.6 * dt;
+      rocket.av *= Math.pow(0.16, dt);
+      rocket.ang += rocket.av * dt;
+
+      const thrusting = thrustingNow();
+      rocket.fire = thrusting ? Math.min(1, rocket.fire + dt * 8) : Math.max(0, rocket.fire - dt * 6);
+
+      let ax = gx, ay = gy;
+      if (thrusting) {
+        const mass = rocket.dry + rocket.fuel * rocket.fuelMass;
+        const acc = rocket.thrust / mass;
+        ax += Math.cos(rocket.ang) * acc;
+        ay += Math.sin(rocket.ang) * acc;
+        const mdot = rocket.thrust / (rocket.isp * 9.81);
+        rocket.fuel = Math.max(0, rocket.fuel - (mdot * dt) / rocket.fuelMass);
+      }
+
+      const h = r - PLANET_R;
+      if (h < ATM_H && h > 0) {
+        const dens = Math.exp(-h / 8500) * 1.225;
+        const v = spd();
+        const dragA = 0.28 * dens * v;
+        if (v > 0.2) { ax -= rocket.vx * dragA / (rocket.dry + rocket.fuel * rocket.fuelMass); ay -= rocket.vy * dragA / (rocket.dry + rocket.fuel * rocket.fuelMass); }
+      }
+
+      rocket.vx += ax * dt;
+      rocket.vy += ay * dt;
+      rocket.x += rocket.vx * dt;
+      rocket.y += rocket.vy * dt;
+
+      const r2 = rmag();
+      if (r2 <= PLANET_R + 10) {
+        const nx = rocket.x / r2, ny = rocket.y / r2;
+        const vn = rocket.vx * nx + rocket.vy * ny;
+        rocket.x = nx * (PLANET_R + 10);
+        rocket.y = ny * (PLANET_R + 10);
+        if (vn < 0 && !thrusting) {
+          const impact = spd();
+          if (impact > 55) {
+            rocket.alive = false;
+            rocket.vx = rocket.vy = 0;
+            msgEl.textContent = "RUD — " + Math.round(impact) + " m/s";
+          } else {
+            rocket.vx -= vn * nx;
+            rocket.vy -= vn * ny;
+            rocket.vx *= 0.4; rocket.vy *= 0.4;
+            if (impact < 12) { rocket.vx = 0; rocket.vy = 0; }
+          }
+        } else if (vn < 0 && thrusting) {
+          rocket.vx -= Math.min(0, vn) * nx;
+          rocket.vy -= Math.min(0, vn) * ny;
+        }
+      }
+
+      const el = orbitalElements();
+      if (!won && rocket.alive && el.per != null && el.per > 80000 && el.apo != null && el.apo < 5000000) {
+        won = true;
+        msgEl.textContent = "ORBIT CONFIRMED";
+      }
+    }
+
+    function worldToScreen(x, y) {
+      const z = cam.z * SCALE_DRAW * (canvas.height / 700);
+      return { x: canvas.width / 2 + (x - cam.x) * z, y: canvas.height / 2 + (y - cam.y) * z };
+    }
+
+    function draw() {
+      ctx.fillStyle = "#02040a";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const targetZ = Math.max(0.16, Math.min(3.4, 900000 / Math.max(80000, alt() + 60000)));
+      cam.z += (targetZ - cam.z) * 0.06;
+      cam.x += (rocket.x - cam.x) * 0.12;
+      cam.y += (rocket.y - cam.y) * 0.12;
+
+      stars.forEach((s) => {
+        const sx = canvas.width / 2 + Math.cos(s.a) * s.d * cam.z * 0.15;
+        const sy = canvas.height / 2 + Math.sin(s.a) * s.d * cam.z * 0.15;
+        ctx.fillStyle = "rgba(220,230,255," + (0.35 + s.s * 0.25) + ")";
+        ctx.fillRect(sx, sy, s.s, s.s);
+      });
+
+      const p = worldToScreen(0, 0);
+      const pr = PLANET_R * cam.z * SCALE_DRAW * (canvas.height / 700);
+      const grd = ctx.createRadialGradient(p.x - pr * 0.25, p.y - pr * 0.25, pr * 0.2, p.x, p.y, pr);
+      grd.addColorStop(0, "#4ea3ff");
+      grd.addColorStop(0.55, "#1d5bb8");
+      grd.addColorStop(0.82, "#163a6e");
+      grd.addColorStop(1, "#0b1a33");
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, Math.max(2, pr), 0, Math.PI * 2);
+      ctx.fillStyle = grd;
+      ctx.fill();
+
+      const or = (PLANET_R + 120000) * cam.z * SCALE_DRAW * (canvas.height / 700);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, or, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(180,220,255,0.16)";
+      ctx.setLineDash([8, 10]);
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const rp = worldToScreen(rocket.x, rocket.y);
+      const z = cam.z * SCALE_DRAW * (canvas.height / 700);
+      const rw = Math.max(5, rocket.w * z * 220);
+      const rh = Math.max(12, rocket.h * z * 220);
+
+      ctx.save();
+      ctx.translate(rp.x, rp.y);
+      ctx.rotate(rocket.ang + Math.PI / 2);
+      if (rocket.fire > 0.05 && rocket.alive) {
+        ctx.fillStyle = "rgba(255,180,60," + (0.55 + 0.45 * rocket.fire) + ")";
+        ctx.beginPath();
+        ctx.moveTo(-rw * 0.28, rh * 0.5);
+        ctx.lineTo(0, rh * 0.5 + rh * (0.55 + Math.random() * 0.5) * rocket.fire);
+        ctx.lineTo(rw * 0.28, rh * 0.5);
+        ctx.fill();
+      }
+      if (rocket.alive) {
+        ctx.fillStyle = "#d8dee8";
+        ctx.fillRect(-rw * 0.32, -rh * 0.5, rw * 0.64, rh * 0.85);
+        ctx.fillStyle = "#3a7cff";
+        ctx.fillRect(-rw * 0.22, -rh * 0.48, rw * 0.44, rh * 0.22);
+        ctx.fillStyle = "#c4482a";
+        ctx.beginPath(); ctx.moveTo(-rw * 0.32, rh * 0.2); ctx.lineTo(-rw * 0.7, rh * 0.5); ctx.lineTo(-rw * 0.32, rh * 0.5); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(rw * 0.32, rh * 0.2); ctx.lineTo(rw * 0.7, rh * 0.5); ctx.lineTo(rw * 0.32, rh * 0.5); ctx.fill();
+        ctx.fillStyle = "#8899aa";
+        ctx.fillRect(-rw * 0.2, rh * 0.28, rw * 0.4, rh * 0.16);
+      } else {
+        ctx.fillStyle = "#ff8844";
+        for (let i = 0; i < 8; i++) ctx.fillRect(Math.cos(i) * rw, Math.sin(i) * rw, 3, 3);
+      }
+      ctx.restore();
+
+      document.getElementById("alt").textContent = fmt(alt());
+      document.getElementById("spd").textContent = Math.round(spd());
+      const el = orbitalElements();
+      document.getElementById("apo").textContent = fmt(el.apo);
+      document.getElementById("per").textContent = fmt(el.per);
+      fuelbar.style.width = (rocket.fuel * 100).toFixed(1) + "%";
+    }
+
+    function loop(ts) {
+      const dt = Math.min(0.033, (ts - last) / 1000 || 0.016);
+      last = ts;
+      if (running) physics(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    function bindHold(el, setter) {
+      const on = (e) => { e.preventDefault(); setter(true); el.classList.add("held"); };
+      const off = () => { setter(false); el.classList.remove("held"); };
+      el.addEventListener("pointerdown", on);
+      el.addEventListener("pointerup", off);
+      el.addEventListener("pointercancel", off);
+      el.addEventListener("pointerleave", off);
+    }
+    bindHold(document.getElementById("left"), (v) => holdL = v);
+    bindHold(document.getElementById("right"), (v) => holdR = v);
+    bindHold(document.getElementById("throttle"), (v) => holdT = v);
+    window.addEventListener("keydown", (e) => { keys[e.key] = true; });
+    window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+    document.getElementById("go").addEventListener("click", () => {
+      reset();
+      running = true;
+      overlay.classList.add("hidden");
+      msgEl.textContent = "Throttle up";
+      setTimeout(() => { if (msgEl.textContent === "Throttle up") msgEl.textContent = ""; }, 1600);
+    });
+  </script>
+</body>
+</html>
